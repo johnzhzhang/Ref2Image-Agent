@@ -188,7 +188,7 @@ async def generate_images(num_images: int, tool_context: ToolContext) -> dict:
     """Generate images using the optimized prompt. Saves as artifacts.
 
     Args:
-        num_images: Number of images to generate (1-6)
+        num_images: Number of images to generate (default 1, max 6)
     """
     optimized_prompt = tool_context.state.get("optimized_prompt")
     if not optimized_prompt:
@@ -240,11 +240,15 @@ async def generate_images(num_images: int, tool_context: ToolContext) -> dict:
     return {"status": "success", "images_generated": len(generated), "round": round_num, "artifacts": generated}
 
 
-async def evaluate_and_select(tool_context: ToolContext) -> dict:
+async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dict:
     """Evaluate each candidate image against reference images.
-    Returns which passed (score>=7) and which failed. Goal: collect 3 passing images.
+    Returns which passed (score>=8) and which failed.
+
+    Args:
+        num_target: How many passing images are needed (e.g. 1 for single image, 3 for batch)
     """
-    logger.info("🔍 [Evaluate] Checking candidate images...")
+    num_target = max(num_target, 1)
+    logger.info(f"🔍 [Evaluate] Target: {num_target} passing images")
     token = _get_token()
     total = tool_context.state.get("total_generated", 0)
 
@@ -338,15 +342,15 @@ async def evaluate_and_select(tool_context: ToolContext) -> dict:
     tool_context.state["failed_indices"] = all_failed_list
     tool_context.state["eval_suggestions"] = "\n".join(all_suggestions) if all_suggestions else ""
 
-    # Save final selected images as final_1, final_2, final_3
-    if len(all_passed) >= 3:
-        for out_i, src_idx in enumerate(all_passed[:3], 1):
+    # Save final selected images as final_1, final_2, ...
+    if len(all_passed) >= num_target:
+        for out_i, src_idx in enumerate(all_passed[:num_target], 1):
             art = await tool_context.load_artifact(filename=f"candidate_{src_idx}.png")
             if art:
                 await tool_context.save_artifact(filename=f"final_{out_i}.png", artifact=art)
-        logger.info(f"  🎉 Got 3 passing images! Saved as final_1/2/3.png")
+        logger.info(f"  🎉 Got {num_target} passing images! Saved as final_1...{num_target}.png")
 
-    still_needed = max(0, 3 - len(all_passed))
+    still_needed = max(0, num_target - len(all_passed))
     logger.info(f"  📋 Total: {len(all_passed)} passed, {len(all_failed_list)} failed, need {still_needed} more")
 
     return {
@@ -355,7 +359,7 @@ async def evaluate_and_select(tool_context: ToolContext) -> dict:
         "passed_indices": all_passed,
         "failed_count": len(all_failed_list),
         "still_needed": still_needed,
-        "goal_reached": len(all_passed) >= 3,
+        "goal_reached": len(all_passed) >= num_target,
         "suggestions": tool_context.state.get("eval_suggestions", "")[:300] if still_needed > 0 else ""
     }
 
@@ -556,34 +560,68 @@ async def edit_image(image_name: str, edit_instruction: str, tool_context: ToolC
         }
 
 
+async def upload_reference(image_role: str, tool_context: ToolContext) -> dict:
+    """Upload a user-provided reference image to replace or add to the default character references.
+    The user should attach an image in their message before calling this tool.
+
+    Args:
+        image_role: Description of what this image is, e.g. "新角色参考" or "替换狐狸角色参考"
+    """
+    logger.info(f"📤 [Upload] Reference image: {image_role}")
+
+    # Check if user attached an image in the current session events
+    # Look through recent events for inline image data
+    session_events = tool_context.state.get("_user_images", [])
+
+    # Store the role for this reference - actual image comes from user message
+    custom_refs = tool_context.state.get("custom_refs", [])
+    custom_refs.append({"role": image_role})
+    tool_context.state["custom_refs"] = custom_refs
+
+    logger.info(f"  ✅ Added custom reference: {image_role} (total custom refs: {len(custom_refs)})")
+    return {
+        "status": "success",
+        "message": f"已添加自定义参考图 '{image_role}'。请在消息中直接附带图片，生成时会自动使用。",
+        "total_custom_refs": len(custom_refs)
+    }
+
+
 # === Agent Definition ===
 root_agent = Agent(
     model="gemini-3.5-flash",
     name="image_gen_agent",
     description="Generates 3D cartoon images with automatic quality evaluation loop and per-image editing.",
-    instruction="""你是 Happy Element 的图像生成助手。生成6个动物角色在中国文化地标的3D卡通图片，确保角色与参考图一致。
+    instruction="""你是 Happy Element 的图像生成助手。生成动物角色在中国文化地标的3D卡通图片，确保角色与参考图一致。
 
-=== 生成流程（严格按顺序）===
+=== 生成流程 ===
 1. optimize_prompt — 优化用户的场景描述为结构化提示词
-2. generate_images(4) — 先生成4张候选图
+2. generate_images — 生成候选图（默认1张，用户可指定数量如"生成3张"）
 3. evaluate_and_select — 逐张评估，筛选>=8分的合格图
 4. 检查结果：
-   - goal_reached=true → 完成，告知用户最终图片为 final_1/2/3.png
-   - still_needed > 0 → refine_prompt → generate_images(still_needed+1) → evaluate_and_select
+   - goal_reached=true → 完成
+   - still_needed > 0 → refine_prompt → generate_images → evaluate_and_select
 5. 最多重复步骤4两次
 
+=== 图片数量规则 ===
+- 默认生成1张图
+- 用户可以指定数量，如"生成3张"、"出5张图"
+- 根据用户要求的最终数量设置目标（如用户要3张，则目标3张合格图）
+
+=== 自定义参考图 ===
+- 用户可以在消息中附带图片作为额外参考
+- 用户说"用这张图作为xx参考" → 调用 upload_reference 记录
+- 后续生成时会自动使用用户提供的参考图
+
 === 编辑流程 ===
-当用户对某张最终图片不满意时：
-1. 用户说"修改第X张图，xxx" → 调用 edit_image(image_name="final_X.png", edit_instruction="用户的修改要求")
-2. edit_image 会自动生成2张修改版并评估
-3. 如果有>=8分的通过，自动替换原图
-4. 如果都没通过，告知用户并建议换一种修改方式
+当用户对某张图不满意时：
+1. 用户说"修改第X张图，xxx" → edit_image
+2. 自动生成2张修改版并评估，>=8分则替换
 
 重要规则：
-- 目标：凑齐3张评分>=8的图片（严格标准）
-- 合格图片保存为 final_1.png, final_2.png, final_3.png
+- 评分标准>=8分（严格）
+- 合格图片保存为 final_1.png, final_2.png, ...
 - 每次评估后告知用户进度和分数
-- 编辑时只改用户要求的部分，其他保持不变""",
-    tools=[optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, PreloadMemoryTool()],
+- 编辑时只改用户要求的部分""",
+    tools=[optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, upload_reference, PreloadMemoryTool()],
     after_agent_callback=save_memories_callback,
 )

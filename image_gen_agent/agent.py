@@ -344,6 +344,11 @@ async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dic
         passed = ev.get("pass", score >= 8)
         logger.info(f"  📊 candidate_{idx}: score={score}/10 {'✅' if passed else '❌'} ({elapsed:.1f}s)")
 
+        # Track all scores
+        all_scores = tool_context.state.get("all_scores", {})
+        all_scores[str(idx)] = score
+        tool_context.state["all_scores"] = all_scores
+
         if passed:
             new_passed.append(idx)
         else:
@@ -358,6 +363,11 @@ async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dic
     tool_context.state["failed_indices"] = all_failed_list
     tool_context.state["eval_suggestions"] = "\n".join(all_suggestions) if all_suggestions else ""
 
+    # Find best scoring candidate overall
+    all_scores = tool_context.state.get("all_scores", {})
+    best_idx = max(all_scores, key=all_scores.get) if all_scores else None
+    best_score = all_scores.get(best_idx, 0) if best_idx else 0
+
     # Save final selected images as final_1, final_2, ...
     if len(all_passed) >= num_target:
         for out_i, src_idx in enumerate(all_passed[:num_target], 1):
@@ -367,7 +377,7 @@ async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dic
         logger.info(f"  🎉 Got {num_target} passing images! Saved as final_1...{num_target}.png")
 
     still_needed = max(0, num_target - len(all_passed))
-    logger.info(f"  📋 Total: {len(all_passed)} passed, {len(all_failed_list)} failed, need {still_needed} more")
+    logger.info(f"  📋 Total: {len(all_passed)} passed, {len(all_failed_list)} failed, need {still_needed} more (best={best_score}/10)")
 
     return {
         "status": "success",
@@ -376,6 +386,8 @@ async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dic
         "failed_count": len(all_failed_list),
         "still_needed": still_needed,
         "goal_reached": len(all_passed) >= num_target,
+        "best_candidate_index": int(best_idx) if best_idx else None,
+        "best_score": best_score,
         "suggestions": tool_context.state.get("eval_suggestions", "")[:300] if still_needed > 0 else ""
     }
 
@@ -603,11 +615,13 @@ root_agent = Agent(
 2. optimize_prompt（基于用户上传的参考图和描述）
 3. generate_images（数量 = 用户要求数 + 1）
 4. evaluate_and_select（num_target = 用户要求数量）
-5. 不通过则 refine_prompt → 再生成 → 再评估（最多2轮）
+5. 不通过则 refine_prompt → 再生成 → 再评估（最多重试5轮）
+6. 如果5轮后仍没有合格图片（score>=8），选所有候选中分数最高的作为最终结果
 
 ⚠️ 严格规则：
 - generate_images 数量 = 用户要求数量 + 1，不要多生成！
 - 只使用用户上传的参考图，没有任何预置角色
+- 最多重试5轮，5轮后选最高分的交付
 
 === 参考图管理 ===
 - 用户附图 + 说明 → add_reference_image(role="描述")

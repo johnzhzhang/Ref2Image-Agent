@@ -118,9 +118,23 @@ async def save_memories_callback(callback_context: CallbackContext):
 
 # === Tools ===
 
+FEATURE_EXTRACT_PROMPT = """请仔细观察这张角色参考图，详细提取所有视觉特征。要求极其精确和详细：
+
+请输出以下信息：
+1. 整体形状和比例（头身比、体型胖瘦、大小）
+2. 主体颜色（精确描述每个部位的颜色，如"身体是橙红色，腹部是奶白色"）
+3. 面部特征（眼睛颜色/大小/形状、嘴巴、鼻子、表情特点）
+4. 独特标识（花纹、斑纹位置和形状、特殊颜色区域）
+5. 配饰/服装（帽子、衣服、蝴蝶结等的颜色、样式、位置）
+6. 四肢特征（手脚颜色、爪子形状）
+7. 尾巴/翅膀等附属特征（颜色、形状、花纹）
+8. 材质/风格感觉（如3D粘土质感、光滑塑料感等）
+
+用简洁精确的中文描述，不要遗漏任何视觉细节。"""
+
+
 async def add_reference_image(role: str, tool_context: ToolContext) -> dict:
-    """Register a user-uploaded image as a reference. The user must attach the image in their message.
-    This tool extracts the most recent image from the conversation.
+    """Register a user-uploaded image as a reference. Automatically extracts detailed visual features using Flash.
 
     Args:
         role: What this image represents, e.g. "机器人角色参考" or "赛博朋克风格参考"
@@ -145,12 +159,40 @@ async def add_reference_image(role: str, tool_context: ToolContext) -> dict:
     if not img_data:
         return {"status": "error", "message": "未找到上传的图片。请在消息中附带图片后重试。"}
 
+    # Use Flash to extract detailed visual features
+    logger.info(f"  🔍 Extracting visual features with Flash...")
+    token = _get_token()
+    parts = [
+        {"text": FEATURE_EXTRACT_PROMPT},
+        {"inline_data": {"mime_type": img_data["mime_type"], "data": img_data["data"]}}
+    ]
+
+    url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
+           f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")
+
+    resp = requests.post(url,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"contents": [{"role": "USER", "parts": parts}],
+              "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048}})
+
+    description = ""
+    if resp.status_code == 200:
+        for c in resp.json().get("candidates", []):
+            for p in c.get("content", {}).get("parts", []):
+                if "text" in p:
+                    description += p["text"]
+        logger.info(f"  ✅ Extracted features: {len(description)} chars")
+    else:
+        logger.warning(f"  ⚠️ Feature extraction failed: {resp.status_code}")
+
+    img_data["description"] = description
+
     session_refs = tool_context.state.get("session_refs", [])
     session_refs.append(img_data)
     tool_context.state["session_refs"] = session_refs
 
-    logger.info(f"  ✅ Added user ref: {role} (total: {len(session_refs)})")
-    return {"status": "success", "role": role, "total_user_refs": len(session_refs)}
+    logger.info(f"  ✅ Added ref: {role} (total: {len(session_refs)})")
+    return {"status": "success", "role": role, "features": description[:300], "total_user_refs": len(session_refs)}
 
 
 async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> dict:
@@ -170,8 +212,11 @@ async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> 
     parts.extend(_build_session_ref_parts(session_refs))
 
     if session_refs:
-        image_desc = "\n".join(f"- IMG_{i} 是{r['role']}" for i, r in enumerate(session_refs, 1))
-        parts.append({"text": f"以上{len(session_refs)}张参考图片：\n{image_desc}\n\n请生成提示词，要求：{scene_description}"})
+        image_desc = "\n".join(
+            f"- IMG_{i} 是{r['role']}" + (f"\n  详细特征：{r['description']}" if r.get('description') else "")
+            for i, r in enumerate(session_refs, 1)
+        )
+        parts.append({"text": f"以上{len(session_refs)}张参考图片：\n{image_desc}\n\n请生成提示词（角色描述必须严格基于上面的详细特征），要求：{scene_description}"})
     else:
         parts.append({"text": f"（无参考图片）\n\n请生成提示词，要求：{scene_description}"})
 

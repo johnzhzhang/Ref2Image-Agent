@@ -118,12 +118,25 @@ def _get_mime(path):
 
 
 def _build_ref_parts():
-    """Build reference image parts for API calls."""
+    """Build reference image parts — uses only active refs from state, falls back to all."""
+    # This is the static version; tools will pass active_refs explicitly
     parts = []
     for img_info in CHARACTER_REFS:
         path = os.path.join(REF_IMAGES_DIR, img_info["file"])
         if os.path.exists(path):
             parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
+    return parts
+
+
+def _build_active_ref_parts(active_indices):
+    """Build reference image parts for only the specified indices (1-based)."""
+    parts = []
+    for i in active_indices:
+        if 1 <= i <= len(CHARACTER_REFS):
+            img_info = CHARACTER_REFS[i - 1]
+            path = os.path.join(REF_IMAGES_DIR, img_info["file"])
+            if os.path.exists(path):
+                parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
     return parts
 
 
@@ -140,6 +153,22 @@ async def save_memories_callback(callback_context: CallbackContext):
 
 # === Tools ===
 
+async def select_references(indices: list[int], tool_context: ToolContext) -> dict:
+    """Select which reference images to use for this generation session.
+    Call this BEFORE optimize_prompt to specify which refs are relevant.
+
+    Args:
+        indices: List of 1-based indices into the available reference images. Available refs:
+                 1=浣熊, 2=风格参考, 3=小鸡, 4=狐狸, 5=猫头鹰, 6=猫头鹰场景,
+                 7=青蛙, 8=青蛙全身, 9=熊, 10=熊场景
+    """
+    valid = [i for i in indices if 1 <= i <= len(CHARACTER_REFS)]
+    tool_context.state["active_refs"] = valid
+    selected = [CHARACTER_REFS[i-1]["role"] for i in valid]
+    logger.info(f"📋 [Select] Active refs: {selected}")
+    return {"status": "success", "active_refs": selected, "indices": valid}
+
+
 async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> dict:
     """Optimize a scene description into a structured image generation prompt using Flash 3.5.
 
@@ -151,9 +180,19 @@ async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> 
     token = _get_token()
 
     parts = [{"text": OPTIMIZER_SYSTEM}]
-    parts.extend(_build_ref_parts())
-    image_desc = "\n".join(f"- IMG_{i} 是{img['role']}" for i, img in enumerate(CHARACTER_REFS, 1))
-    parts.append({"text": f"以上{len(CHARACTER_REFS)}张图片：\n{image_desc}\n\n请生成提示词，要求：{scene_description}"})
+
+    # Use only active refs if set, otherwise all
+    active = tool_context.state.get("active_refs")
+    if active:
+        ref_parts = _build_active_ref_parts(active)
+        active_refs_info = [CHARACTER_REFS[i-1] for i in active if 1 <= i <= len(CHARACTER_REFS)]
+    else:
+        ref_parts = _build_ref_parts()
+        active_refs_info = CHARACTER_REFS
+
+    parts.extend(ref_parts)
+    image_desc = "\n".join(f"- IMG_{i} 是{img['role']}" for i, img in enumerate(active_refs_info, 1))
+    parts.append({"text": f"以上{len(active_refs_info)}张图片：\n{image_desc}\n\n请生成提示词，要求：{scene_description}"})
 
     url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
            f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")
@@ -199,7 +238,8 @@ async def generate_images(num_images: int, tool_context: ToolContext) -> dict:
     token = _get_token()
 
     parts = [{"text": CHAR_REF_PREFIX}]
-    parts.extend(_build_ref_parts())
+    active = tool_context.state.get("active_refs")
+    parts.extend(_build_active_ref_parts(active) if active else _build_ref_parts())
     parts.append({"text": optimized_prompt})
 
     url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
@@ -438,7 +478,8 @@ async def edit_image(image_name: str, edit_instruction: str, tool_context: ToolC
 """
 
     parts = [{"text": CHAR_REF_PREFIX}]
-    parts.extend(_build_ref_parts())
+    active = tool_context.state.get("active_refs")
+    parts.extend(_build_active_ref_parts(active) if active else _build_ref_parts())
     parts.append({"text": "=== 需要修改的原图 ==="})
     parts.append({"inline_data": {"mime_type": "image/png", "data": original_b64}})
     parts.append({"text": edit_prompt})
@@ -607,12 +648,16 @@ root_agent = Agent(
 - 如果用户给了完整描述 → 直接执行，不要多问
 
 === 生成流程 ===
-1. 确认素材充分后 → optimize_prompt（基于用户提供的参考图和描述）
-2. generate_images（数量 = 用户要求的最终图片数 + 1，如用户要1张则生成2张用于筛选）
-3. evaluate_and_select（num_target = 用户要求的最终数量）
-4. 不通过则 refine_prompt → 再生成(still_needed+1) → 再评估（最多2轮）
+1. 确认素材充分后 → select_references（根据用户需求选择相关的参考图，只选用户提到的角色）
+2. optimize_prompt（基于选中的参考图和用户描述）
+3. generate_images（数量 = 用户要求的最终图片数 + 1，如用户要1张则生成2张用于筛选）
+4. evaluate_and_select（num_target = 用户要求的最终数量）
+5. 不通过则 refine_prompt → 再生成(still_needed+1) → 再评估（最多2轮）
 
-⚠️ 严格规则：generate_images 的数量 = 用户要求数量 + 1，不要多生成！用户要1张就生成2张，要3张就生成4张。
+⚠️ 严格规则：
+- generate_images 的数量 = 用户要求数量 + 1，不要多生成！
+- select_references 只选用户明确提到的角色，不要把所有角色都选上！
+- 用户提到3个角色就只选3个角色的参考图
 
 === 编辑流程 ===
 用户说"修改第X张图" → edit_image
@@ -624,6 +669,6 @@ root_agent = Agent(
 - 不要预设"必须是6个动物角色"或"必须在中国地标"——这些由用户决定
 - 评估标准基于用户提供的参考图，没有参考图则只评估画面质量和动作合理性
 - 灵活适应各种生图需求""",
-    tools=[optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, upload_reference, PreloadMemoryTool()],
+    tools=[select_references, optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, upload_reference, PreloadMemoryTool()],
     after_agent_callback=save_memories_callback,
 )

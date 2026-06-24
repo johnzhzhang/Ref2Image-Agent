@@ -399,7 +399,8 @@ async def refine_prompt(tool_context: ToolContext) -> dict:
 {suggestions}
 
 直接输出修改后的完整提示词。"""}]
-    parts.extend(_build_ref_parts())
+    session_refs = tool_context.state.get("session_refs", [])
+    parts.extend(_build_session_ref_parts(session_refs))
 
     url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
            f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")

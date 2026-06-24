@@ -16,21 +16,8 @@ logger = logging.getLogger("image_gen_agent")
 
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "john-poc-453315")
 REGION = os.environ.get("GOOGLE_CLOUD_REGION", "global")
-REF_IMAGES_DIR = os.environ.get("REF_IMAGES_DIR", "/tmp/nano_images")
 
-# Default character refs (can be overridden by user uploads)
-DEFAULT_REFS = [
-    {"file": "a166e269a528cd48faa4848d9617600a249083.jpeg", "role": "浣熊角色参考"},
-    {"file": "2dc690e2357fef10fb6260f6d73bcbad152534.jpeg", "role": "整体风格参考"},
-    {"file": "c21f5ca4f07cec444ce5625085c27445132701.jpeg", "role": "小鸡角色参考"},
-    {"file": "7c05e45a7abd8391f1fdf34fabdffea6235175.jpeg", "role": "狐狸角色参考"},
-    {"file": "cc89ffc7d78ef27166464e799e59b590210591.jpeg", "role": "猫头鹰角色参考"},
-    {"file": "7c2824a25aa962bb1eb001495bfecafc1481356.png", "role": "猫头鹰场景参考"},
-    {"file": "cf1bbb51d381b19bfc397278854be4b41402876.png", "role": "青蛙角色参考"},
-    {"file": "d7222fbde2bb40677be78d9febc26d201230050.png", "role": "青蛙全身参考"},
-    {"file": "831ce2416fc684a43a2bd3d68e1784c8218923.jpeg", "role": "熊角色参考"},
-    {"file": "8980026972ed3622b9ffdeb7cf50147c1327010.png", "role": "熊场景参考"},
-]
+# No default refs — all reference images come from user uploads in the session
 
 OPTIMIZER_SYSTEM = """你是一个专业的AI图像生成提示词优化师。
 
@@ -108,42 +95,8 @@ def _get_token():
     return r.stdout.strip()
 
 
-def _load_image_b64(path):
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-
-def _get_mime(path):
-    ext = os.path.splitext(path)[1].lower().lstrip(".")
-    return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(ext, "image/png")
-
-
-def _build_ref_parts():
-    """Build ALL default reference image parts."""
-    parts = []
-    for img_info in DEFAULT_REFS:
-        path = os.path.join(REF_IMAGES_DIR, img_info["file"])
-        if os.path.exists(path):
-            parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
-    return parts
-
-
-def _build_active_ref_parts(active_indices):
-    """Build reference image parts for only the specified indices (1-based) from DEFAULT_REFS."""
-    parts = []
-    for i in active_indices:
-        if 1 <= i <= len(DEFAULT_REFS):
-            img_info = DEFAULT_REFS[i - 1]
-            path = os.path.join(REF_IMAGES_DIR, img_info["file"])
-            if os.path.exists(path):
-                parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
-    return parts
-
-
 def _build_session_ref_parts(session_refs):
-    """Build reference image parts from session state (user-uploaded images).
-    session_refs: list of {"role": str, "data": base64_str, "mime_type": str}
-    """
+    """Build reference image parts from user-uploaded images in session state."""
     parts = []
     for ref in session_refs:
         parts.append({"inline_data": {"mime_type": ref["mime_type"], "data": ref["data"]}})
@@ -162,32 +115,6 @@ async def save_memories_callback(callback_context: CallbackContext):
 
 
 # === Tools ===
-
-async def select_references(indices: list[int], tool_context: ToolContext) -> dict:
-    """Select which default reference images to use, combined with any user-uploaded refs.
-
-    Args:
-        indices: List of 1-based indices from default refs. Available:
-                 1=浣熊, 2=风格参考, 3=小鸡, 4=狐狸, 5=猫头鹰, 6=猫头鹰场景,
-                 7=青蛙, 8=青蛙全身, 9=熊, 10=熊场景.
-                 Pass empty list [] if only using user-uploaded images.
-    """
-    valid = [i for i in indices if 1 <= i <= len(DEFAULT_REFS)]
-    tool_context.state["active_refs"] = valid
-    selected = [DEFAULT_REFS[i-1]["role"] for i in valid]
-
-    # Also report user-uploaded refs
-    session_refs = tool_context.state.get("session_refs", [])
-    uploaded = [r["role"] for r in session_refs]
-
-    logger.info(f"📋 [Select] Default refs: {selected}, User refs: {uploaded}")
-    return {
-        "status": "success",
-        "default_refs_selected": selected,
-        "user_uploaded_refs": uploaded,
-        "total_ref_count": len(valid) + len(session_refs)
-    }
-
 
 async def add_reference_image(role: str, tool_context: ToolContext) -> dict:
     """Register a user-uploaded image as a reference. The user must attach the image in their message.
@@ -236,25 +163,15 @@ async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> 
 
     parts = [{"text": OPTIMIZER_SYSTEM}]
 
-    # Use only active refs if set, otherwise all defaults
-    active = tool_context.state.get("active_refs")
-    if active:
-        ref_parts = _build_active_ref_parts(active)
-        active_refs_info = [DEFAULT_REFS[i-1] for i in active if 1 <= i <= len(DEFAULT_REFS)]
-    else:
-        ref_parts = _build_ref_parts()
-        active_refs_info = DEFAULT_REFS
-
-    # Add user-uploaded session refs
+    # Use only user-uploaded session refs
     session_refs = tool_context.state.get("session_refs", [])
-    session_ref_parts = _build_session_ref_parts(session_refs)
+    parts.extend(_build_session_ref_parts(session_refs))
 
-    parts.extend(ref_parts)
-    parts.extend(session_ref_parts)
-
-    all_refs_info = list(active_refs_info) + [{"role": r["role"]} for r in session_refs]
-    image_desc = "\n".join(f"- IMG_{i} 是{img['role']}" for i, img in enumerate(all_refs_info, 1))
-    parts.append({"text": f"以上{len(all_refs_info)}张图片：\n{image_desc}\n\n请生成提示词，要求：{scene_description}"})
+    if session_refs:
+        image_desc = "\n".join(f"- IMG_{i} 是{r['role']}" for i, r in enumerate(session_refs, 1))
+        parts.append({"text": f"以上{len(session_refs)}张参考图片：\n{image_desc}\n\n请生成提示词，要求：{scene_description}"})
+    else:
+        parts.append({"text": f"（无参考图片）\n\n请生成提示词，要求：{scene_description}"})
 
     url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
            f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")
@@ -300,8 +217,6 @@ async def generate_images(num_images: int, tool_context: ToolContext) -> dict:
     token = _get_token()
 
     parts = [{"text": CHAR_REF_PREFIX}]
-    active = tool_context.state.get("active_refs")
-    parts.extend(_build_active_ref_parts(active) if active else _build_ref_parts())
     session_refs = tool_context.state.get("session_refs", [])
     parts.extend(_build_session_ref_parts(session_refs))
     parts.append({"text": optimized_prompt})
@@ -376,13 +291,12 @@ async def evaluate_and_select(num_target: int, tool_context: ToolContext) -> dic
 
     logger.info(f"  📷 Evaluating {len(to_evaluate)} new candidates (already passed: {len(already_passed)})")
 
-    # Build ref parts for evaluation
+    # Build ref parts for evaluation from session refs
     ref_parts = []
-    for img_info in CHARACTER_REFS:
-        path = os.path.join(REF_IMAGES_DIR, img_info["file"])
-        if os.path.exists(path):
-            ref_parts.append({"text": f"[{img_info['role']}]:"})
-            ref_parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
+    session_refs = tool_context.state.get("session_refs", [])
+    for ref in session_refs:
+        ref_parts.append({"text": f"[{ref['role']}]:"})
+        ref_parts.append({"inline_data": {"mime_type": ref["mime_type"], "data": ref["data"]}})
 
     url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
            f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")
@@ -542,8 +456,6 @@ async def edit_image(image_name: str, edit_instruction: str, tool_context: ToolC
 """
 
     parts = [{"text": CHAR_REF_PREFIX}]
-    active = tool_context.state.get("active_refs")
-    parts.extend(_build_active_ref_parts(active) if active else _build_ref_parts())
     session_refs = tool_context.state.get("session_refs", [])
     parts.extend(_build_session_ref_parts(session_refs))
     parts.append({"text": "=== 需要修改的原图 ==="})
@@ -587,11 +499,10 @@ async def edit_image(image_name: str, edit_instruction: str, tool_context: ToolC
     # Evaluate each candidate
     logger.info("  🔍 Evaluating edit candidates...")
     ref_parts = []
-    for img_info in CHARACTER_REFS:
-        path = os.path.join(REF_IMAGES_DIR, img_info["file"])
-        if os.path.exists(path):
-            ref_parts.append({"text": f"[{img_info['role']}]:"})
-            ref_parts.append({"inline_data": {"mime_type": _get_mime(path), "data": _load_image_b64(path)}})
+    session_refs = tool_context.state.get("session_refs", [])
+    for ref in session_refs:
+        ref_parts.append({"text": f"[{ref['role']}]:"})
+        ref_parts.append({"inline_data": {"mime_type": ref["mime_type"], "data": ref["data"]}})
 
     eval_url = (f"https://aiplatform.googleapis.com/v1/projects/{PROJECT}"
                 f"/locations/{REGION}/publishers/google/models/gemini-3.5-flash:generateContent")
@@ -675,45 +586,37 @@ root_agent = Agent(
 === 核心原则 ===
 - 风格完全由用户的提示词决定（3D卡通、写实、2D插画等都可以）
 - 角色/内容完全依赖用户提供的 reference image
-- 你不预设任何风格限制，用户说什么风格就什么风格
+- 你不预设任何风格限制，没有任何预置角色
 
 === 素材引导 ===
-在开始生成前，先评估用户提供的素材是否充分：
-1. 如果用户没有提供任何参考图 → 询问是否需要提供角色/风格参考图
-2. 如果用户只提供了部分角色参考 → 提醒"目前有X个角色参考，是否还需要补充其他角色？"
-3. 如果用户没有指定风格 → 询问期望的风格方向（3D卡通/写实/扁平等）
-4. 如果用户明确说"就这些，开始生成" → 直接开始，不再追问
-
-风格补全规则：
-- 如果用户只说了场景没说风格 → 建议补充风格描述
-- 如果用户说了风格但不够具体（如只说"卡通"）→ 可以追问"Q版大头还是正常比例？色彩明亮还是柔和？"
-- 如果用户给了完整描述 → 直接执行，不要多问
+在开始生成前，评估用户素材是否充分：
+1. 用户没有提供参考图 → 询问"是否需要上传角色/风格参考图？没有也可以直接生成"
+2. 用户上传了图但没说明用途 → 询问"这张图是作为角色参考还是风格参考？"
+3. 用户没有指定风格 → 询问期望的风格方向
+4. 用户说"直接生成" → 开始，不再追问
 
 === 生成流程 ===
-1. 确认素材充分后 → select_references（根据用户需求选择相关的参考图，只选用户提到的角色）
-2. optimize_prompt（基于选中的参考图和用户描述）
-3. generate_images（数量 = 用户要求的最终图片数 + 1，如用户要1张则生成2张用于筛选）
-4. evaluate_and_select（num_target = 用户要求的最终数量）
-5. 不通过则 refine_prompt → 再生成(still_needed+1) → 再评估（最多2轮）
+1. 用户上传参考图时 → add_reference_image 记录每张图的用途
+2. optimize_prompt（基于用户上传的参考图和描述）
+3. generate_images（数量 = 用户要求数 + 1）
+4. evaluate_and_select（num_target = 用户要求数量）
+5. 不通过则 refine_prompt → 再生成 → 再评估（最多2轮）
 
 ⚠️ 严格规则：
-- generate_images 的数量 = 用户要求数量 + 1，不要多生成！
-- select_references 只选用户明确提到的角色，不要把所有角色都选上！
-- 用户提到3个角色就只选3个角色的参考图
+- generate_images 数量 = 用户要求数量 + 1，不要多生成！
+- 只使用用户上传的参考图，没有任何预置角色
+
+=== 参考图管理 ===
+- 用户附图 + 说明 → add_reference_image(role="描述")
+- 支持任何类型：角色、风格、场景、构图参考等
+- 用户可多次上传逐步补充
 
 === 编辑流程 ===
 用户说"修改第X张图" → edit_image
 
-=== 自定义参考图 ===
-- 用户可以在消息中附带图片，然后说"这是xx角色参考" → 调用 add_reference_image(role="xx角色参考")
-- 用户可以完全不使用默认的动物角色，只用自己上传的图
-- 如果用户只上传了图片没有默认角色 → select_references([]) 传空列表，只使用用户上传的
-- 支持任何类型的角色：动物、人物、机器人、怪兽等
-
 === 重要 ===
-- 不要预设"必须是6个动物角色"或"必须在中国地标"——这些由用户决定
 - 评估标准基于用户提供的参考图，没有参考图则只评估画面质量和动作合理性
 - 灵活适应各种生图需求""",
-    tools=[select_references, add_reference_image, optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, PreloadMemoryTool()],
+    tools=[add_reference_image, optimize_prompt, generate_images, evaluate_and_select, refine_prompt, edit_image, PreloadMemoryTool()],
     after_agent_callback=save_memories_callback,
 )

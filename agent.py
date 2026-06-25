@@ -10,7 +10,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.tool_context import ToolContext
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 import google.genai.types as types
-from llm import GeminiWithLocation
+from .llm import GeminiWithLocation
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ref2image_agent")

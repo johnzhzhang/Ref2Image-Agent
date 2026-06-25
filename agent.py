@@ -264,10 +264,10 @@ async def optimize_prompt(scene_description: str, tool_context: ToolContext) -> 
 
     tool_context.state["optimized_prompt"] = optimized
     tool_context.state["generation_round"] = 0
-    tool_context.state["total_generated"] = 0
-    tool_context.state["passed_indices"] = []
-    tool_context.state["failed_indices"] = []
-    tool_context.state["all_scores"] = {}
+    tool_context.state["total_generated"] = tool_context.state.get("total_generated", 0)  # preserve across refines
+    tool_context.state.setdefault("passed_indices", [])
+    tool_context.state.setdefault("failed_indices", [])
+    tool_context.state.setdefault("all_scores", {})
     tool_context.state["eval_suggestions"] = ""
     logger.info(f"  ✅ Prompt: {len(optimized)} chars")
     return {"status": "success", "prompt_length": len(optimized), "prompt_preview": optimized[:300]}

@@ -1,0 +1,15 @@
+[project]
+name = "nano-banana-pro-agent"
+version = "1.0.0"
+description = "Image generation agent with reference-based character consistency evaluation"
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=2.0",
+    "google-cloud-aiplatform[agent_engines,adk]>=1.112",
+    "google-auth",
+    "requests",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

@@ -12,7 +12,7 @@ from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 import google.genai.types as types
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("image_gen_agent")
+logger = logging.getLogger("ref2image_agent")
 
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "john-poc-453315")
 REGION = os.environ.get("GOOGLE_CLOUD_REGION", "global")
@@ -680,8 +680,8 @@ async def edit_image(image_name: str, edit_instruction: str, tool_context: ToolC
 # === Agent Definition ===
 root_agent = Agent(
     model="gemini-3.5-flash",
-    name="image_gen_agent",
-    description="Generates images based on user-provided reference images and prompts, with automatic quality evaluation.",
+    name="ref2image_agent",
+    description="Upload reference images, generate matching images with automatic quality evaluation and iterative refinement.",
     instruction="""你是一个通用的图像生成助手。根据用户提供的参考图和描述生成高质量图片。
 
 === 核心原则 ===
